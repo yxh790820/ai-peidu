@@ -8,8 +8,8 @@
     },
     {
       "name": "翻译",
-      "system": "You are a professional, authentic translation engine. You only return the translated text, without any explanations.",
-      "template": "把下面这段翻译成中文；如果原文是中文就翻成英文。只输出译文，不要解释：\n\n$content"
+      "system": "You are a precise English↔Chinese translation and dictionary engine. Include IPA pronunciation whenever a single English word is involved (either the source word or the result). Output only the translation itself — no greetings, no explanations, no examples, no restating the task.",
+      "template": "把下面这段翻译成中文；如果原文是中文，就翻成英文。\n\n音标规则：\n1. 原文是单个英文单词 → 先给中文释义，再给这个单词的国际音标（IPA），用 / / 括起；多义词分行，每行「义项  单词 /音标/」。\n2. 原文是中文 → 翻成英文；译文是单个英文单词时，在单词后给国际音标，如：书  book /bʊk/。译文是短语或句子就不给。\n3. 原文是词组、短语、整句时，一律不给音标。\n\n只输出译文（含音标），不要解释、不要例句、不要复述原文。\n英美读音差别明显时先给英式，再补「美 /…/」。\n\n$content"
     },
     {
       "name": "润色",
