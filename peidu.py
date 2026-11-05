@@ -169,13 +169,14 @@ FORMULA_SYS = ("You are a LaTeX transcription engine. You read the formulas in a
                "Output exactly one ```latex fenced block and nothing outside it.")
 FORMULA_USR = """把图里的公式转成 LaTeX 代码。
 
+0. 这条消息里如果没有图片（只有文字），不要猜、不要编，直接回这一行：截图转公式只认截图，请按 Alt+2 框选公式。
 1. 只输出一个 ```latex 代码块，里面是纯 LaTeX：不要 $ 定界符，不要 \\begin{document}，不要中文解说。
 2. 每个独立公式一行；同一串推导用 aligned 环境，按等号对齐。
 3. 分数用 \\frac，根号用 \\sqrt，数字之间的乘号用 \\times，点乘用 \\cdot；
    希腊字母用 \\alpha / \\Delta 这类命令，不要写 Unicode 字母。
 4. 上下标、单位、中文按图照抄，别改写、别翻译、别解释含义。
    单个拉丁字母的下标照原样写（E_k、v_x、F_1），不要改写成 \\kappa 这类希腊字母；图上明确是希腊字母时才用 \\alpha / \\Delta。
-5. 图里不是公式、或实在认不出来 → 只输出一行：没有识别到公式。"""
+5. 图里不是公式、或实在认不出来 → 只输出一行**纯文本**（不要包 ``` 代码块）：没有识别到公式。"""
 FORMULA_PROMPT = {"name": "截图转公式", "system": FORMULA_SYS, "template": FORMULA_USR}
 
 TRANSLATE_SYS = ("You are a precise English↔Chinese translation and dictionary engine. "
@@ -2214,8 +2215,21 @@ class PeiduApp:
         self.wiki_query = ""
         self.wiki_img = None
         self.wiki_label = ""
+        is_formula = (self.current_prompt() or {}).get("name") == FORMULA_PROMPT["name"]
+        # 截图转公式：只认截图。纯文字发过去，模型会把文字硬编成公式（用户实测「乱写」），
+        # 所以这里直接拦掉、不发请求、不动 messages —— 显式失败，不猜。
+        if is_formula and not img:
+            shown = (question or "").strip() or (quote or "").strip() or "（空）"
+            self.append_chat("我：" + shown[:200], "user")
+            self.append_chat("〔截图转公式〕这一档只认截图：纯文字不发请求。"
+                             "按 Alt+2 或点「📐 截公式」框住公式；要问文字或追问，把提示词切回「陪读」。", "err")
+            self.status.config(text="截图转公式：需要截图")
+            log("截图转公式拦截：没有截图，未发请求")
+            return
         wiki_on = (self.wiki_var.get() if getattr(self, "wiki_var", None) is not None
                    else bool(self.cfg.get("wiki_enabled")))
+        if is_formula:
+            wiki_on = False        # 转公式不查维基：省一次看图提关键词 + 检索
         # 维基档 + 开关关着：不发给模型，直接说没开，避免它凭记忆编条目内容
         if (self.current_prompt() or {}).get("wiki") and not wiki_on:
             shown = (question or "").strip() or (quote or "").strip() or "（截图）"
@@ -2232,7 +2246,12 @@ class PeiduApp:
         if not self.messages:
             self.messages = [{"role": "system", "content": self.current_system()}]
         tpl = (self.current_prompt().get("template") or "").strip()
-        if tpl and not question.strip() and (quote or img):
+        if tpl and is_formula and img:
+            # 截图转公式：模板必须带上（图才是主体），用户打的字只当「补充要求」
+            extra = question.strip()
+            content = tpl + ("\n\n补充要求：" + extra if extra else "")
+            shown = "〔%s〕" % self.prompt_name
+        elif tpl and not question.strip() and (quote or img):
             # 有引用 / 截图又没打字：直接套这个提示词的模板（截图时占位成「见截图」）
             content = tpl.replace("$content", quote or "（见截图）")
             shown = "〔%s〕" % self.prompt_name
@@ -2559,7 +2578,11 @@ class PeiduApp:
     def _autocopy_latex(self, text):
         """「截图转公式」答完顺手把 LaTeX 放进剪贴板，直接去 Word/PPT 里粘。"""
         codes = [c.strip() for is_code, c in _split_fences(text) if is_code and c.strip()]
+        # 模型把「没有识别到公式」也包进代码块的情况（本地模型会这样）别复制
+        codes = [c for c in codes
+                 if not (len(c) < 40 and "识别到公式" in c)]
         if not codes:
+            self.append_chat("〔这张图里没识别到公式：没有复制任何东西〕", "muted")
             return
         self.copy_code("\n".join(codes))
         self.append_chat("〔LaTeX 已复制到剪贴板，可直接粘贴〕", "muted")
