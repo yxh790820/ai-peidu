@@ -1938,11 +1938,73 @@ class PeiduApp:
         win.focus_force()
         first_rb.select()
 
+    def force_front(self):
+        """真正把窗口拉到前台。
+
+        deiconify/lift 只在「从隐藏恢复」时管用；窗口只是被别的程序盖住
+        （state 仍是 normal）时，lift 会被 Windows 的前台锁挡掉，表现就是
+        「取词了，窗口没跳上来」。所以直接走 Win32：恢复 → 按 pin 设 z 序 →
+        AttachThreadInput 抢前台（不抢的话键盘还在原窗口里，追问打不了字）。
+        """
+        try:
+            self.root.deiconify()
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        try:
+            u = ctypes.windll.user32
+            k = ctypes.windll.kernel32
+            hwnd = u.GetAncestor(self.root.winfo_id(), 2) or self.root.winfo_id()
+            if u.IsIconic(hwnd):
+                u.ShowWindow(hwnd, 9)                       # SW_RESTORE
+            u.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                       ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            u.SetWindowPos.restype = wt.BOOL
+            # hWndInsertAfter 必须声明 argtypes 后再传负数，否则 64 位下会被截断、静默失败
+            # 不管有没有锁 pin，唤出时先临时置顶：有些阅读器/浏览器会抢回前台，
+            # 只靠 SetForegroundWindow 会「前台是它、眼睛还是看不见」。
+            u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x43)          # HWND_TOPMOST
+            if not getattr(self, "pinned", False):
+                self.root.after(1200, self.drop_temp_topmost)
+            fg0 = u.GetForegroundWindow()
+            fg = fg0
+            if fg != hwnd:
+                tid_fg = u.GetWindowThreadProcessId(fg, None)
+                tid_me = k.GetCurrentThreadId()
+                attached = False
+                if tid_fg and tid_fg != tid_me:
+                    attached = bool(u.AttachThreadInput(tid_me, tid_fg, True))
+                u.SetForegroundWindow(hwnd)
+                if attached:
+                    u.AttachThreadInput(tid_me, tid_fg, False)
+                self.root.update_idletasks()
+                log("show: hwnd=%s vis=%s iconic=%s attach=%s fg0=%s fg1=%s" % (
+                    hwnd, u.IsWindowVisible(hwnd), u.IsIconic(hwnd), attached, fg0,
+                    u.GetForegroundWindow()))
+        except Exception as ex:
+            log("前置窗口失败: %r" % (ex,))
+        try:
+            self.root.focus_force()
+            self.entry.focus_set()
+        except Exception:
+            pass
+
+    def drop_temp_topmost(self):
+        """唤出 1.2 秒后撤掉临时置顶（只在没锁 pin 时挂这个定时器）。"""
+        if getattr(self, "pinned", False):
+            return
+        try:
+            u = ctypes.windll.user32
+            hwnd = u.GetAncestor(self.root.winfo_id(), 2) or self.root.winfo_id()
+            u.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                       ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            u.SetWindowPos.restype = wt.BOOL
+            u.SetWindowPos(hwnd, -2, 0, 0, 0, 0, 0x43)       # HWND_NOTOPMOST
+        except Exception as ex:
+            log("撤临时置顶失败: %r" % (ex,))
+
     def show(self):
-        self.root.deiconify()
-        self.root.lift()
-        self.root.attributes("-topmost", bool(getattr(self, "pinned", True)))
-        self.entry.focus_set()
+        self.force_front()
 
     def on_unmap(self, e):
         """点最小化时收进托盘，不留在任务栏（没托盘就老实留在任务栏）。"""
