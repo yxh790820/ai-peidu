@@ -33,5 +33,6 @@
   "theme": "light",
   "wiki_base": "https://zh.wikipedia.org",
   "wiki_fallback": "https://zh.wikipedia.org",
-  "wiki_proxy": ""
+  "wiki_proxy": "",
+  "wiki_enabled": false
 }

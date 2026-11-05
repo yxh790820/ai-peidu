@@ -150,8 +150,14 @@ GUWEN2_USR = """把下面的文言文翻译成通顺的现代汉语，只输出�
 
 $content"""
 
-WIKI_SYS = ("你是读书陪读助手，回答依据是用户维基百科（本地 Kiwix 或官方 Wikipedia）的条目资料。"
-            "优先用【维基资料】里的内容：先给结论，再挑关键段落讲清楚；提到条目时写出条目名。"
+WIKI_SYS_OLD = ("你是读书陪读助手，回答依据是用户维基百科（本地 Kiwix 或官方 Wikipedia）的条目资料。"
+                "优先用【维基资料】里的内容：先给结论，再挑关键段落讲清楚；提到条目时写出条目名。"
+                "资料里没有的不要编，直接说「维基里没查到」；可以补常识，但要说明那是补充。"
+                "中文回答，不要客套话，不要复述问题。")
+WIKI_SYS = ("你是读书陪读助手，回答依据是维基百科（本地 Kiwix 或官方 Wikipedia）的条目资料。"
+            "如果用户这条消息里没有【维基资料】，说明这次没有开启维基检索："
+            "直接回答「没有开启查维基，先勾上主界面的 ☑ 查维基」，不要凭记忆作答，不要编条目内容。"
+            "有【维基资料】时优先用它：先给结论，再挑关键段落讲清楚；提到条目时写出条目名；"
             "资料里没有的不要编，直接说「维基里没查到」；可以补常识，但要说明那是补充。"
             "中文回答，不要客套话，不要复述问题。")
 WIKI_PROMPT = {"name": "维基百科", "system": WIKI_SYS, "template": "", "wiki": True}
@@ -269,8 +275,21 @@ def load_prompts():
 
 
 def _with_wiki(prompts):
-    """老 prompts.json 没有「维基百科」这一档时补上（只加不改，已有 wiki 档就不动）。"""
+    """老 prompts.json 没有「维基百科」这一档时补上；旧版维基 system 文案升级一次。
+
+    「只加不改」的原则保留：只有开头与旧文案逐字对得上的 system 才替换（用户自己改过的不动）。
+    """
     try:
+        changed = False
+        for p in prompts:
+            sys_txt = p.get("system")
+            if p.get("wiki") and isinstance(sys_txt, str) and sys_txt.startswith(WIKI_SYS_OLD):
+                p["system"] = WIKI_SYS + sys_txt[len(WIKI_SYS_OLD):]
+                changed = True
+        if changed:
+            with open(PROMPTS_PATH, "w", encoding="utf-8") as f:
+                json.dump({"prompts": prompts}, f, ensure_ascii=False, indent=2)
+            log("维基档 system 升级：没开查维基时直说，不编")
         if any(p.get("wiki") for p in prompts) or any(p.get("name") == WIKI_PROMPT["name"] for p in prompts):
             return prompts
         prompts = list(prompts) + [dict(WIKI_PROMPT)]
@@ -1142,16 +1161,27 @@ class PeiduApp:
         self.prompt_cb = pc
         tk.Button(prow, text="编辑", bg=PANEL, fg=FG, bd=0, font=FONT_S, activebackground=BORDER,
                   activeforeground=FG, command=self.open_prompts).pack(side="left")
+        # 主界面开关行：左边「查维基」（高频，勾上亮强调色），右边两个「自动」（设置型、低频）
+        orow = tk.Frame(r, bg=BG)
+        orow.pack(fill="x", padx=14, pady=(0, 2))
+        self.wiki_var = tk.BooleanVar(value=bool(self.cfg.get(
+            "wiki_enabled", bool((self.current_prompt() or {}).get("wiki")))))
+        self.wiki_cb = tk.Checkbutton(orow, text="查维基", variable=self.wiki_var, bg=BG,
+                                      fg=ACCENT if self.wiki_var.get() else MUTED,
+                                      selectcolor=PANEL, activebackground=BG, activeforeground=FG,
+                                      font=FONT_S, bd=0, highlightthickness=0,
+                                      command=self.toggle_wiki)
+        self.wiki_cb.pack(side="left")
         self.auto_var = tk.BooleanVar(value=bool(self.cfg.get("auto_explain", True)))
         self.auto_img_var = tk.BooleanVar(value=bool(self.cfg.get("auto_explain_image", True)))
-        tk.Checkbutton(prow, text="截图后自动", variable=self.auto_img_var, bg=BG, fg=MUTED,
+        tk.Checkbutton(orow, text="截图后自动", variable=self.auto_img_var, bg=BG, fg=MUTED,
                        selectcolor=PANEL, activebackground=BG, activeforeground=FG,
                        font=FONT_S, bd=0, highlightthickness=0,
                        command=self.toggle_auto_img).pack(side="right")
-        tk.Checkbutton(prow, text="取词后自动", variable=self.auto_var, bg=BG, fg=MUTED,
+        tk.Checkbutton(orow, text="取词后自动", variable=self.auto_var, bg=BG, fg=MUTED,
                        selectcolor=PANEL, activebackground=BG, activeforeground=FG,
                        font=FONT_S, bd=0, highlightthickness=0,
-                       command=self.toggle_auto).pack(side="right", padx=(0, 8))
+                       command=self.toggle_auto).pack(side="right", padx=(0, 12))
 
         # 引用区（默认不显示）
         self.quote_frame = tk.Frame(r, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
@@ -1384,6 +1414,17 @@ class PeiduApp:
         self.cfg["auto_explain_image"] = bool(self.auto_img_var.get())
         self.save_cfg()
         self.status.config(text="截图后自动解释：%s" % ("开" if self.auto_img_var.get() else "关"))
+
+    def toggle_wiki(self):
+        """主界面的「查维基」：全局开关，跟提示词无关，存 config 跨重启保持。"""
+        on = bool(self.wiki_var.get())
+        self.cfg["wiki_enabled"] = on
+        self.save_cfg()
+        try:
+            self.wiki_cb.config(fg=ACCENT if on else MUTED)
+        except Exception:
+            pass
+        self.status.config(text="查维基：%s" % ("开" if on else "关"))
 
     def toggle_pin(self):
         self.pinned = not self.pinned
@@ -1649,11 +1690,9 @@ class PeiduApp:
         usr_txt = tk.Text(right, height=8, bg=PANEL, fg=FG, insertbackground=FG, bd=0,
                           font=FONT_S, padx=8, pady=6, wrap="word")
         usr_txt.pack(fill="x", pady=(2, 8))
-        wiki_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(right, text="先检索维基，把命中的条目一起发给模型",
-                       variable=wiki_var, bg=BG, fg=MUTED, selectcolor=PANEL,
-                       activebackground=BG, activeforeground=FG, font=FONT_S,
-                       bd=0, highlightthickness=0).pack(anchor="w", pady=(0, 6))
+        # 查维基已改成主界面的全局开关（存 config）；这里只提示，不再放勾，避免两处控制打架
+        tk.Label(right, text="查维基由主界面的「☑ 查维基」统一控制（全局开关，跟提示词无关）",
+                 bg=BG, fg=MUTED, font=FONT_S, wraplength=520, justify="left").pack(anchor="w", pady=(0, 6))
 
         def refresh(select=None):
             state["loading"] = True
@@ -1680,7 +1719,6 @@ class PeiduApp:
             sys_txt.insert("1.0", p.get("system", ""))
             usr_txt.delete("1.0", "end")
             usr_txt.insert("1.0", p.get("template", ""))
-            wiki_var.set(bool(p.get("wiki")))
 
         def apply_fields():
             if not data:
@@ -1689,7 +1727,6 @@ class PeiduApp:
             data[i]["name"] = name_var.get().strip() or data[i]["name"]
             data[i]["system"] = sys_txt.get("1.0", "end").strip()
             data[i]["template"] = usr_txt.get("1.0", "end").strip()
-            data[i]["wiki"] = bool(wiki_var.get())
 
         def on_pick(_=None):
             if state["loading"]:
@@ -2037,12 +2074,22 @@ class PeiduApp:
         self.clear_quote()
 
     def start_round(self, question, quote, img):
-        # 这一轮要不要先查维基（由当前提示词的 wiki 标记决定）
+        # 这一轮要不要先查维基（主界面的全局开关，不跟提示词走）
         self.wiki_srcs = []
         self.wiki_query = ""
         self.wiki_img = None
         self.wiki_label = ""
-        if (self.current_prompt() or {}).get("wiki"):
+        wiki_on = (self.wiki_var.get() if getattr(self, "wiki_var", None) is not None
+                   else bool(self.cfg.get("wiki_enabled")))
+        # 维基档 + 开关关着：不发给模型，直接说没开，避免它凭记忆编条目内容
+        if (self.current_prompt() or {}).get("wiki") and not wiki_on:
+            shown = (question or "").strip() or (quote or "").strip() or "（截图）"
+            self.append_chat("我：" + shown, "user")
+            self.append_chat("〔维基〕没有开启查维基。先勾上主界面的「查维基」再问。", "err")
+            self.status.config(text="维基：没开")
+            log("维基档拦截：没开查维基，未发请求")
+            return
+        if wiki_on:
             q = (question or "").strip() or (quote or "").strip()
             self.wiki_query = q.splitlines()[0][:80] if q else ""
             if not self.wiki_query and img:
