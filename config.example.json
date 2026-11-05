@@ -1,0 +1,37 @@
+{
+  "default": "deepseek",
+  "save_dir": "D:\\陪读笔记",
+  "providers": {
+    "deepseek": {
+      "base": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "key": "",
+      "params": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
+    "本地": {
+      "base": "http://localhost:18080",
+      "model": "local",
+      "key": "",
+      "params": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    }
+  },
+  "pin": true,
+  "default_prompt": "陪读",
+  "hotkey_text": "alt+1",
+  "hotkey_image": "alt+2",
+  "auto_explain": true,
+  "auto_explain_image": true,
+  "font_size": 14,
+  "theme": "light",
+  "wiki_base": "https://zh.wikipedia.org",
+  "wiki_fallback": "https://zh.wikipedia.org",
+  "wiki_proxy": ""
+}

@@ -1,0 +1,25 @@
+# 运行时数据 / 隐私（不进仓库）
+config.json
+config.json.bak
+peidu.log
+run.lock
+show.request
+images/
+selftest*.txt
+
+# 便携运行时与打包产物（走 GitHub Releases，不进仓库）
+runtime/
+陪读.exe
+*.spec
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 备份文件
+*.bak
+
+# 快捷方式（带本机绝对路径）
+*.lnk
