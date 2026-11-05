@@ -162,11 +162,26 @@ WIKI_SYS = ("你是读书陪读助手，回答依据是维基百科（本地 Kiw
             "中文回答，不要客套话，不要复述问题。")
 WIKI_PROMPT = {"name": "维基百科", "system": WIKI_SYS, "template": "", "wiki": True}
 
+TRANSLATE_SYS = ("You are a precise English↔Chinese translation and dictionary engine. "
+                 "Include IPA pronunciation whenever a single English word is involved "
+                 "(either the source word or the result). "
+                 "Output only the translation itself — no greetings, no explanations, "
+                 "no examples, no restating the task.")
+TRANSLATE_USR = """把下面这段翻译成中文；如果原文是中文，就翻成英文。
+
+音标规则：
+1. 原文是单个英文单词 → 先给中文释义，再给这个单词的国际音标（IPA），用 / / 括起；多义词分行，每行「义项  单词 /音标/」。
+2. 原文是中文 → 翻成英文；译文是单个英文单词时，在单词后给国际音标，如：书  book /bʊk/。译文是短语或句子就不给。
+3. 原文是词组、短语、整句时，一律不给音标。
+
+只输出译文（含音标），不要解释、不要例句、不要复述原文。
+英美读音差别明显时先给英式，再补「美 /…/」。
+
+$content"""
+
 DEFAULT_PROMPTS = [
     {"name": "陪读", "system": SYSTEM_PROMPT, "template": ""},
-    {"name": "翻译",
-     "system": "You are a professional, authentic translation engine. You only return the translated text, without any explanations.",
-     "template": "把下面这段翻译成中文；如果原文是中文就翻成英文。只输出译文，不要解释：\n\n$content"},
+    {"name": "翻译", "system": TRANSLATE_SYS, "template": TRANSLATE_USR},
     {"name": "润色",
      "system": "You are a professional, authentic text polishing engine. You only return the polished text, without any explanations.",
      "template": "把下面这段文字润色得更通顺自然，保持原意和语气，只输出润色后的文字：\n\n$content"},
