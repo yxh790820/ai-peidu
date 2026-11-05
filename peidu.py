@@ -72,28 +72,29 @@ PALETTES = {
         "BG": "#1e1f22", "PANEL": "#2b2d31", "PANEL2": "#232428", "FG": "#e6e6e6",
         "MUTED": "#9aa0a6", "ACCENT": "#4c8dff", "ACCENT_ACTIVE": "#3f7ae0", "BORDER": "#3a3d43",
         "USER_FG": "#8fb7ff", "CODE_FG": "#d6e2f0", "ERR_FG": "#ff7b72", "STOP_BG": "#7a3b3b",
-        "SEL_BG": "#4c8dff", "SEL_FG": "#ffffff", "BTN_FG": "#ffffff",
+        "SEL_BG": "#4c8dff", "SEL_FG": "#ffffff", "BTN_FG": "#ffffff", "BTN_BG": "#2b2d31",
     },
     "light": {
         "BG": "#ffffff", "PANEL": "#f3f5f8", "PANEL2": "#e9eef5", "FG": "#1f2328",
         "MUTED": "#6b7280", "ACCENT": "#2f6feb", "ACCENT_ACTIVE": "#255bc4", "BORDER": "#d7dce3",
         "USER_FG": "#1f5fd0", "CODE_FG": "#0f172a", "ERR_FG": "#c0392b", "STOP_BG": "#c0625c",
-        "SEL_BG": "#2f6feb", "SEL_FG": "#ffffff", "BTN_FG": "#ffffff",
+        "SEL_BG": "#2f6feb", "SEL_FG": "#ffffff", "BTN_FG": "#ffffff", "BTN_BG": "#e9eef5",
     },
 }
 
 BG = PANEL = PANEL2 = FG = MUTED = ACCENT = ACCENT_ACTIVE = BORDER = ""
-USER_FG = CODE_FG = ERR_FG = STOP_BG = SEL_BG = SEL_FG = BTN_FG = ""
+USER_FG = CODE_FG = ERR_FG = STOP_BG = SEL_BG = SEL_FG = BTN_FG = BTN_BG = ""
 
 
 def set_palette(name):
     global BG, PANEL, PANEL2, FG, MUTED, ACCENT, ACCENT_ACTIVE, BORDER
-    global USER_FG, CODE_FG, ERR_FG, STOP_BG, SEL_BG, SEL_FG, BTN_FG
+    global USER_FG, CODE_FG, ERR_FG, STOP_BG, SEL_BG, SEL_FG, BTN_FG, BTN_BG
     p = PALETTES.get(name) or PALETTES["dark"]
     BG, PANEL, PANEL2, FG, MUTED = p["BG"], p["PANEL"], p["PANEL2"], p["FG"], p["MUTED"]
     ACCENT, ACCENT_ACTIVE, BORDER = p["ACCENT"], p["ACCENT_ACTIVE"], p["BORDER"]
     USER_FG, CODE_FG, ERR_FG = p["USER_FG"], p["CODE_FG"], p["ERR_FG"]
     STOP_BG, SEL_BG, SEL_FG, BTN_FG = p["STOP_BG"], p["SEL_BG"], p["SEL_FG"], p["BTN_FG"]
+    BTN_BG = p["BTN_BG"]
 
 
 set_palette("dark")
@@ -1260,21 +1261,40 @@ class PeiduApp:
         side.pack(side="right", padx=(8, 0))
         self.send_btn = tk.Button(side, text="发送", bg=ACCENT, fg=BTN_FG, bd=0, font=FONT,
                                   activebackground=ACCENT_ACTIVE, activeforeground=BTN_FG,
-                                  command=self.on_send, width=6, height=2)
+                                  command=self.on_send, width=7, height=2)
         self.send_btn.pack(fill="x")
-        brow = tk.Frame(side, bg=BG)
-        brow.pack(fill="x", pady=(6, 0))
-        tk.Button(brow, text="新话题", bg=PANEL, fg=FG, bd=0, font=FONT_S, width=5,
-                  activebackground=BORDER, activeforeground=FG,
-                  command=self.new_topic).pack(side="left")
-        tk.Button(brow, text="存笔记", bg=PANEL, fg=FG, bd=0, font=FONT_S, width=5,
-                  activebackground=BORDER, activeforeground=FG,
-                  command=self.save_note).pack(side="left", padx=(6, 0))
+        # 新话题 / 存笔记：与「发送」同宽竖排，新话题做得更显眼（高频，按 Ctrl+N 也行）
+        self.new_btn = tk.Button(side, text="新话题", bg=BTN_BG, fg=ACCENT, bd=0, font=FONT,
+                                 width=7, height=2, cursor="hand2",
+                                 activebackground=BORDER, activeforeground=ACCENT,
+                                 command=self.new_topic)
+        self.new_btn.pack(fill="x", pady=(6, 0))
+        self.note_btn = tk.Button(side, text="存笔记", bg=BTN_BG, fg=MUTED, bd=0, font=FONT_S,
+                                  width=7, cursor="hand2",
+                                  activebackground=BORDER, activeforeground=FG,
+                                  command=self.save_note)
+        self.note_btn.pack(fill="x", pady=(5, 0))
+        self._add_hover(self.new_btn)
+        self._add_hover(self.note_btn)
         self.entry.pack(side="left", fill="both", expand=True)
 
         self.chat_wrap.pack(fill="both", expand=True, padx=14, pady=6)
         self.apply_fonts()
         self.entry.focus_set()
+        # Ctrl+N = 新话题（焦点在输入框里也能用；Text 自己的类绑定会先吃掉，所以 entry 上单独绑一份）
+        r.bind("<Control-n>", self.on_new_topic_key)
+        self.entry.bind("<Control-n>", self.on_new_topic_key)
+
+    def on_new_topic_key(self, e=None):
+        self.new_topic()
+        return "break"
+
+    @staticmethod
+    def _add_hover(btn):
+        """鼠标悬停时底色提亮，让这两个小按钮看起来能点。"""
+        normal = btn.cget("bg")
+        btn.bind("<Enter>", lambda e: btn.config(bg=BORDER))
+        btn.bind("<Leave>", lambda e: btn.config(bg=normal))
 
     # ---------------- 生命周期
     def start_hotkeys(self):
