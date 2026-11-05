@@ -452,15 +452,29 @@ def _split_inline(line):
 
 
 # ---------------------------------------------------------------- 公式渲染
+# mathtext 没有矩阵/分段，只有这几类环境能压成一行画出来
+_ENV_LINEAR = ("aligned", "align", "align*", "gather", "gather*", "split",
+               "equation", "equation*", "eqnarray", "eqnarray*")
+
+
 def _math_fix(expr):
     """把常见的 LaTeX 方言收敛到 matplotlib mathtext 认的子集。
 
-    认不了的（\\begin{aligned}、带中文的 \\text）返回 None，调用方回退成原文。
+    画不了的（\\begin{cases}/\\begin{matrix}、带中文的 \\text）返回 None，调用方回退成原文。
+    2026-11-06：补 \\limits / \\boxed / aligned 这几类——模型写推导时常用，mathtext 不认。
     """
     s = expr.strip()
-    if not s or "\\begin{" in s or "\\end{" in s:
+    if not s:
         return None
-    s = re.sub(r"\\(tag|label|nonumber|notag){[^{}]*}", "", s)
+    # 只有能线性化成一行的环境才接；cases / matrix / array 这些 mathtext 压根没有，回退原文
+    envs = re.findall(r"\\begin\{([a-zA-Z*]+)\}", s)
+    if any(e not in _ENV_LINEAR for e in envs):
+        return None
+    for e in envs:
+        s = s.replace("\\begin{%s}" % e, "").replace("\\end{%s}" % e, "")
+    s = re.sub(r"\\(limits|nolimits)(?![a-zA-Z])", "", s)  # \sum\limits_{} → \sum_{}（后面常紧跟 _，别用 \b）
+    s = re.sub(r"\\(tag|label|nonumber|notag)\{[^{}]*\}", "", s)
+    s = s.replace("\\boxed{", "{")                        # \boxed{X} 的 {...} 本身就是分组
     pairs = (
         ("\\dfrac", "\\frac"), ("\\tfrac", "\\frac"), ("\\cfrac", "\\frac"),
         ("\\textbf{", "\\mathbf{"), ("\\textit{", "\\mathit{"),

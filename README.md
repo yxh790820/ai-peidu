@@ -26,7 +26,7 @@
 
 ### 方式一：下载便携包（推荐）
 
-到 [Releases](../../releases) 下载 `AI-Peidu-v1.1.4.zip`，解压到任意目录（路径别带奇怪的权限限制），然后：
+到 [Releases](../../releases) 下载 `AI-Peidu-v1.1.5.zip`，解压到任意目录（路径别带奇怪的权限限制），然后：
 
 - 双击 `陪读.exe`，或
 - 双击 `启动陪读.bat`（用包内自带的 Python 运行源码）
@@ -118,6 +118,11 @@ AI陪读便携版\
 **截图/公式图会留着吗？** 不会。`images\` 是运行期缓存，正常退出时清空；要留的图当场点「存笔记」，会被复制进笔记目录的 `attachments\`。
 
 ## 更新日志
+
+### v1.1.5（2026-11-06）
+
+- **修公式渲染失败**：mathtext 不认 `\sum\limits_{}`、`\boxed{}`、`\begin{aligned}` 这类写法，模型写推导时一出现就渲染成一片红字「公式渲染失败」+ 裸 LaTeX。现在 `_math_fix()` 会先把这几种收敛掉：`\limits`/`\nolimits` 直接去掉、`\boxed{X}` 换成 `{X}`、`aligned/align/gather/split/equation` 去掉环境标记并按行压成一行（`&` 清掉、`\\` 变成间隔）。`cases` / `matrix` / `array` mathtext 真没有，仍然回退成原文
+- 实测 15 条常见物理/数学写法：修前 7 条渲染不出来，修后 13 条正常（剩 2 条是 cases/matrix）
 
 ### v1.1.4（2026-11-06）
 
