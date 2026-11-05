@@ -1235,8 +1235,7 @@ class PeiduApp:
         # 底部状态栏（先 pack，落在最底）
         foot = tk.Frame(r, bg=BG)
         foot.pack(side="bottom", fill="x", padx=16, pady=(0, 8))
-        self.status = tk.Label(foot, text="就绪", bg=BG, fg=MUTED, font=FONT_S)
-        self.status.pack(side="left")
+        self.status = tk.Label(foot, text="就绪", bg=BG, fg=MUTED, font=FONT_S, anchor="w")
         tk.Button(foot, text="☀" if self.theme == "dark" else "🌙", bg=BG, fg=MUTED, bd=0, font=FONT_S,
                   activebackground=BG, activeforeground=FG,
                   command=self.toggle_theme).pack(side="right", padx=(0, 8))
@@ -1248,6 +1247,8 @@ class PeiduApp:
                   activeforeground=FG, command=self.hide).pack(side="right", padx=(0, 10))
         tk.Button(foot, text="退出", bg=BG, fg=MUTED, bd=0, font=FONT_S, activebackground=BG,
                   activeforeground=ERR_FG, command=self.quit).pack(side="right")
+        # 状态文字最后 pack：先让右侧按钮占好位，文字过长时被裁掉，不会盖住按钮
+        self.status.pack(side="left", fill="x", expand=True)
 
         # 输入区
         inp = tk.Frame(r, bg=BG)
