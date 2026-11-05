@@ -163,6 +163,21 @@ WIKI_SYS = ("你是读书陪读助手，回答依据是维基百科（本地 Kiw
             "中文回答，不要客套话，不要复述问题。")
 WIKI_PROMPT = {"name": "维基百科", "system": WIKI_SYS, "template": "", "wiki": True}
 
+# 截图 → LaTeX：给物理老师做讲义用。答案只允许一个 ```latex 代码块，好一键复制
+FORMULA_SYS = ("You are a LaTeX transcription engine. You read the formulas in an image and return LaTeX code "
+               "only: no explanations, no translation, no restating, no greetings. "
+               "Output exactly one ```latex fenced block and nothing outside it.")
+FORMULA_USR = """把图里的公式转成 LaTeX 代码。
+
+1. 只输出一个 ```latex 代码块，里面是纯 LaTeX：不要 $ 定界符，不要 \\begin{document}，不要中文解说。
+2. 每个独立公式一行；同一串推导用 aligned 环境，按等号对齐。
+3. 分数用 \\frac，根号用 \\sqrt，数字之间的乘号用 \\times，点乘用 \\cdot；
+   希腊字母用 \\alpha / \\Delta 这类命令，不要写 Unicode 字母。
+4. 上下标、单位、中文按图照抄，别改写、别翻译、别解释含义。
+   单个拉丁字母的下标照原样写（E_k、v_x、F_1），不要改写成 \\kappa 这类希腊字母；图上明确是希腊字母时才用 \\alpha / \\Delta。
+5. 图里不是公式、或实在认不出来 → 只输出一行：没有识别到公式。"""
+FORMULA_PROMPT = {"name": "截图转公式", "system": FORMULA_SYS, "template": FORMULA_USR}
+
 TRANSLATE_SYS = ("You are a precise English↔Chinese translation and dictionary engine. "
                  "Include IPA pronunciation whenever a single English word is involved "
                  "(either the source word or the result). "
@@ -192,6 +207,7 @@ DEFAULT_PROMPTS = [
     {"name": "拼音+简单解释", "system": PINYIN_SYS, "template": PINYIN_USR},
     {"name": "古文今译", "system": GUWEN1_SYS, "template": GUWEN1_USR},
     {"name": "古文纯译", "system": GUWEN2_SYS, "template": GUWEN2_USR},
+    FORMULA_PROMPT,
     WIKI_PROMPT,
 ]
 
@@ -279,7 +295,7 @@ def load_prompts():
         try:
             d = json.load(open(PROMPTS_PATH, encoding="utf-8"))
             if d.get("prompts"):
-                return _with_wiki(d["prompts"])
+                return _with_formula(_with_wiki(d["prompts"]))
         except Exception as ex:
             log("读 prompts.json 失败，用默认: %r" % ex)
     d = {"prompts": DEFAULT_PROMPTS}
@@ -287,7 +303,7 @@ def load_prompts():
         json.dump(d, open(PROMPTS_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     except Exception:
         pass
-    return _with_wiki(list(DEFAULT_PROMPTS))
+    return _with_formula(_with_wiki(list(DEFAULT_PROMPTS)))
 
 
 def _with_wiki(prompts):
@@ -314,6 +330,20 @@ def _with_wiki(prompts):
         log("提示词库补上「维基百科」一档")
     except Exception as ex:
         log("补维基提示词失败: %r" % ex)
+    return prompts
+
+
+def _with_formula(prompts):
+    """老 prompts.json 没有「截图转公式」这一档时补上（只加不改，用户改过的档一个字都不动）。"""
+    try:
+        if any(p.get("name") == FORMULA_PROMPT["name"] for p in prompts):
+            return prompts
+        prompts = list(prompts) + [dict(FORMULA_PROMPT)]
+        with open(PROMPTS_PATH, "w", encoding="utf-8") as f:
+            json.dump({"prompts": prompts}, f, ensure_ascii=False, indent=2)
+        log("提示词库补上「截图转公式」一档")
+    except Exception as ex:
+        log("补截图转公式提示词失败: %r" % ex)
     return prompts
 
 
@@ -1177,6 +1207,11 @@ class PeiduApp:
         self.prompt_cb = pc
         tk.Button(prow, text="编辑", bg=PANEL, fg=FG, bd=0, font=FONT_S, activebackground=BORDER,
                   activeforeground=FG, command=self.open_prompts).pack(side="left")
+        # 截图转公式：一键切档 + 框选，物理老师做讲义的高频入口
+        self.formula_btn = tk.Button(prow, text="📐 截公式", bg=PANEL, fg=MUTED, bd=0, font=FONT_S,
+                                     activebackground=BORDER, activeforeground=FG, cursor="hand2",
+                                     command=self.grab_formula)
+        self.formula_btn.pack(side="left", padx=(6, 0))
         # 主界面开关行：左边「查维基」（高频，勾上亮强调色），右边两个「自动」（设置型、低频）
         orow = tk.Frame(r, bg=BG)
         orow.pack(fill="x", padx=14, pady=(0, 2))
@@ -1231,6 +1266,7 @@ class PeiduApp:
         self.chat.configure(state="disabled")
         self.chat_imgs = []
         self.shot_at = {}
+        self.code_btns = []
 
         # 底部状态栏（先 pack，落在最底）
         foot = tk.Frame(r, bg=BG)
@@ -1388,6 +1424,7 @@ class PeiduApp:
         self.status.config(text="已切换到%s" % ("亮色" if new == "light" else "暗色"))
 
     def replay_chat(self):
+        self._drop_code_btns()
         self.chat.configure(state="normal")
         self.chat.delete("1.0", "end")
         for idx, m in enumerate(self.messages):
@@ -2195,8 +2232,9 @@ class PeiduApp:
         if not self.messages:
             self.messages = [{"role": "system", "content": self.current_system()}]
         tpl = (self.current_prompt().get("template") or "").strip()
-        if tpl and quote and not question.strip():
-            content = tpl.replace("$content", quote)
+        if tpl and not question.strip() and (quote or img):
+            # 有引用 / 截图又没打字：直接套这个提示词的模板（截图时占位成「见截图」）
+            content = tpl.replace("$content", quote or "（见截图）")
             shown = "〔%s〕" % self.prompt_name
         else:
             q = question.strip() or "解释这段"
@@ -2389,6 +2427,19 @@ class PeiduApp:
         self.root.withdraw()      # 截图时先让开，抓完再 show()；这里必须真隐藏，不能只最小化
         self.root.after(160, lambda: RegionPicker(self.root, self.on_region))
 
+    def grab_formula(self):
+        """一键截图转公式：切到「截图转公式」档再框选，框完自动发（AutoImg 开的时候）。"""
+        if self.busy:
+            self.status.config(text="等这一轮答完再截")
+            return
+        name = FORMULA_PROMPT["name"]
+        if name not in [p.get("name") for p in self.prompts]:
+            self.prompts = _with_formula(list(self.prompts))
+            self.prompt_cb.configure(values=[p["name"] for p in self.prompts])
+        self.set_prompt(name)
+        self.prompt_var.set(name)
+        self.do_grab_image()
+
     def on_region(self, result):
         self.show()
         if not result:
@@ -2417,6 +2468,8 @@ class PeiduApp:
         self.chat.configure(state="disabled")
         if text.strip():
             self.messages.append({"role": "assistant", "content": text})
+        if self.prompt_name == FORMULA_PROMPT["name"]:
+            self._autocopy_latex(text)
         srcs = getattr(self, "wiki_srcs", [])
         if srcs:
             head = "〔维基·官方〕" if getattr(self, "wiki_label", "") == "官方维基" else "〔维基〕"
@@ -2470,8 +2523,46 @@ class PeiduApp:
             if is_code:
                 for ln in chunk.split("\n"):
                     self.chat.insert("end", ln + "\n", "code")
+                if rich and chunk.strip():
+                    # 流式阶段不建按钮：render_stream 每 60ms 删掉重排一次，按钮会一直闪
+                    self._insert_copy_btn(chunk)
                 continue
             self._render_md(chunk, tag, rich)
+
+    def _insert_copy_btn(self, code):
+        """代码块下面挂一个「复制」小按钮：公式 LaTeX 一键进剪贴板。"""
+        btn = tk.Button(self.chat, text="⧉ 复制", bg=PANEL, fg=MUTED, bd=0, font=FONT_S,
+                        padx=6, pady=0, cursor="hand2", activebackground=BORDER,
+                        activeforeground=FG, command=lambda c=code: self.copy_code(c))
+        self.chat.window_create("end", window=btn, padx=2, pady=2)
+        getattr(self, "code_btns", []).append(btn)
+        self.chat.insert("end", "\n", "bot")
+
+    def copy_code(self, code):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+            self.root.update_idletasks()
+            self.status.config(text="已复制 %d 字到剪贴板" % len(code))
+        except Exception as ex:
+            self.status.config(text="复制失败：" + str(ex)[:40])
+
+    def _drop_code_btns(self):
+        """清空对话区前先销毁内嵌的「复制」按钮：Text 删掉窗口不会自己回收控件。"""
+        for b in getattr(self, "code_btns", []) or []:
+            try:
+                b.destroy()
+            except Exception:
+                pass
+        self.code_btns = []
+
+    def _autocopy_latex(self, text):
+        """「截图转公式」答完顺手把 LaTeX 放进剪贴板，直接去 Word/PPT 里粘。"""
+        codes = [c.strip() for is_code, c in _split_fences(text) if is_code and c.strip()]
+        if not codes:
+            return
+        self.copy_code("\n".join(codes))
+        self.append_chat("〔LaTeX 已复制到剪贴板，可直接粘贴〕", "muted")
 
     def _render_md(self, chunk, tag, rich):
         line_start = True
@@ -2583,6 +2674,7 @@ class PeiduApp:
         self.img_by_idx = {}
         self.chat_imgs = []
         self.shot_at = {}
+        self._drop_code_btns()
         self.chat.configure(state="normal")
         self.chat.delete("1.0", "end")
         self.chat.configure(state="disabled")
