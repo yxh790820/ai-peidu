@@ -377,7 +377,60 @@ def load_config():
     return cfg
 
 
+def clip_seq():
+    """剪贴板序号：任何程序写入剪贴板都会 +1，用来判断「这次 Ctrl+C 有没有真复制」。"""
+    try:
+        user32.GetClipboardSequenceNumber.restype = wt.DWORD
+        return int(user32.GetClipboardSequenceNumber())
+    except Exception:
+        return 0
+
+
+def clip_get_win32():
+    """直接读 CF_UNICODETEXT，绕开 Tk 的 OLE 剪贴板。
+
+    Tk 的 clipboard_get 在浏览器/Office 大段复制、或剪贴板被别的进程短暂持有时
+    会抛 TclError，被 clip_get 吞成空串，表现就是「窗口出来了但说没取到字」。
+    这里用 Win32 再读一遍兜底。
+    """
+    CF_UNICODETEXT = 13
+    try:
+        user32.OpenClipboard.argtypes = [wt.HWND]
+        user32.OpenClipboard.restype = wt.BOOL
+        user32.GetClipboardData.argtypes = [wt.UINT]
+        user32.GetClipboardData.restype = wt.HANDLE
+        kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
+        kernel32.GlobalLock.restype = wt.LPVOID
+        kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wt.BOOL
+    except Exception:
+        pass
+    for _ in range(10):
+        if user32.OpenClipboard(None):
+            try:
+                h = user32.GetClipboardData(CF_UNICODETEXT)
+                if not h:
+                    return ""
+                p = kernel32.GlobalLock(h)
+                if not p:
+                    return ""
+                try:
+                    return ctypes.wstring_at(p)
+                finally:
+                    kernel32.GlobalUnlock(h)
+            finally:
+                try:
+                    user32.CloseClipboard()
+                except Exception:
+                    pass
+        time.sleep(0.02)          # 别的进程正占着剪贴板，稍等再开
+    return ""
+
+
 def clip_get(root):
+    t = clip_get_win32()
+    if t:
+        return t
     try:
         return root.clipboard_get()
     except Exception:
@@ -393,7 +446,8 @@ def clip_set(root, text):
         pass
 
 
-def wait_modifiers_released(timeout=1.2):
+def wait_modifiers_released(timeout=3.0):
+    """等 Alt/Ctrl 松开。热键是 Alt+1，按着不放就发 Ctrl+C 会变成 Alt+Ctrl+C。"""
     end = time.time() + timeout
     while time.time() < end:
         if not (user32.GetAsyncKeyState(0x12) & 0x8000) and not (user32.GetAsyncKeyState(0x11) & 0x8000):
@@ -402,13 +456,71 @@ def wait_modifiers_released(timeout=1.2):
     return False
 
 
-def send_ctrl_c():
-    VK_CONTROL, VK_C, KEYUP = 0x11, 0x43, 0x0002
+def _send_copy(alt=False):
+    """发 Ctrl+C；alt=True 发 Ctrl+Insert（终端、老阅读器认这一手）。"""
+    VK_CONTROL, KEYUP = 0x11, 0x0002
+    vk = 0x2D if alt else 0x43
     user32.keybd_event(VK_CONTROL, 0, 0, 0)
-    user32.keybd_event(VK_C, 0, 0, 0)
-    time.sleep(0.02)
-    user32.keybd_event(VK_C, 0, KEYUP, 0)
+    time.sleep(0.012)
+    user32.keybd_event(vk, 0, 0, 0)
+    time.sleep(0.030)
+    user32.keybd_event(vk, 0, KEYUP, 0)
+    time.sleep(0.012)
     user32.keybd_event(VK_CONTROL, 0, KEYUP, 0)
+
+
+def send_ctrl_c():
+    _send_copy(False)
+
+
+def fg_desc():
+    """前台窗口的「类名|标题」，取词日志里用来定位是哪个程序没响应 Ctrl+C。"""
+    try:
+        user32.GetForegroundWindow.restype = wt.HWND
+        hwnd = user32.GetForegroundWindow()
+        n = int(user32.GetWindowTextLengthW(hwnd))
+        buf = ctypes.create_unicode_buffer(n + 2)
+        user32.GetWindowTextW(hwnd, buf, n + 2)
+        cls = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls, 256)
+        return "%s|%s" % (cls.value, buf.value[:24])
+    except Exception:
+        return "?"
+
+
+def grab_selection(total=1.5):
+    """按 Ctrl+C 取当前选中文字，返回 (text, info)。
+
+    2026-11-06：修「偶尔取不到选中文字」。
+    旧做法是先把剪贴板清空、固定等 0.30s 再读——浏览器/Office 大段复制、
+    或目标程序复制前先读一次剪贴板时，300ms 根本不够，读到的还是空串。
+    现在：记剪贴板序号 → 发 Ctrl+C → 40ms 查一次序号，有新内容立刻读；
+    1.5s 内没动静就重发，第 3 次换 Ctrl+Insert；原来的剪贴板一个字都不动。
+    """
+    seq0 = clip_seq()
+    t0 = time.time()
+    info = {"seq0": seq0, "tries": 0, "ms": 0, "why": ""}
+    attempts = 4
+    for i in range(attempts):
+        info["tries"] = i + 1
+        _send_copy(alt=(i >= 2))
+        deadline = time.time() + (0.42 if i < attempts - 1 else 0.35)
+        while time.time() < deadline and time.time() - t0 < total:
+            time.sleep(0.04)
+            seq = clip_seq()
+            if seq != seq0:
+                text = clip_get_win32() or ""
+                info["ms"] = int((time.time() - t0) * 1000)
+                info["seq1"] = seq
+                if text.strip():
+                    info["why"] = "ok"
+                    return text, info
+                info["why"] = "剪贴板里不是文字"
+                return "", info
+    info["ms"] = int((time.time() - t0) * 1000)
+    info["seq1"] = clip_seq()
+    info["why"] = "应用没响应 Ctrl+C"
+    return "", info
 
 
 def virtual_screen():
@@ -2414,7 +2526,8 @@ class PeiduApp:
                 elif kind == "status":
                     self.status.config(text=str(data))
                 elif kind == "grab_done":
-                    self.finish_grab_text()
+                    text, info = data
+                    self.finish_grab_text(text, info)
                 elif kind == "hotkey":
                     if getattr(self, "suppress_hotkeys", False):
                         continue
@@ -2428,25 +2541,42 @@ class PeiduApp:
 
     def do_grab_text(self):
         # 不先 show：抢焦点会让 Ctrl+C 落到自己窗口上，取到的就是旧内容
+        if getattr(self, "grabbing", False):
+            return                      # 上一次还没取完，连按不叠加
+        self.grabbing = True
         self.status.config(text="取词中…")
-        self._clip_prev = clip_get(self.root)
-        clip_set(self.root, "")
 
         def job():
-            wait_modifiers_released()
-            time.sleep(0.05)
-            send_ctrl_c()
-            time.sleep(0.30)
-            self.q.put(("grab_done", None))
+            try:
+                fg = fg_desc()
+                if not wait_modifiers_released(3.0):
+                    log("取词: 跳过，Alt/Ctrl 一直没松开")
+                    self.q.put(("grab_done", ("", {"why": "按键没松开", "tries": 0, "ms": 0})))
+                    return
+                time.sleep(0.06)        # 让目标程序先把热键的 keyup 处理完
+                text, info = grab_selection()
+                log("取词: %s %s fg=%s" % ("OK" if text.strip() else "失败", info, fg))
+                self.q.put(("grab_done", (text, info)))
+            except Exception as ex:
+                log("取词线程异常: %r" % (ex,))
+                self.q.put(("grab_done", ("", {"why": "内部异常", "tries": 0, "ms": 0})))
 
         threading.Thread(target=job, daemon=True).start()
 
-    def finish_grab_text(self):
-        text = clip_get(self.root)
+    def finish_grab_text(self, text="", info=None):
+        self.grabbing = False
+        info = info or {}
+        text = text or ""
         if not text.strip():
-            clip_set(self.root, getattr(self, "_clip_prev", ""))
             self.show()
-            self.status.config(text="没取到选中文字：先用鼠标选中一段再按热键")
+            why = info.get("why", "")
+            if why == "按键没松开":
+                msg = "没取到：热键还按着，松开 Alt 再按一次"
+            elif why == "剪贴板里不是文字":
+                msg = "没取到：复制出来的不是文字"
+            else:
+                msg = "没取到选中文字：先选中文字再按热键"
+            self.status.config(text=msg)
             return
         self.show()
         self.set_quote(text=text)
