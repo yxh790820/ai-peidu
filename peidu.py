@@ -49,6 +49,8 @@ LOG_PATH = os.path.join(APP_DIR, "peidu.log")
 CACHE_DIR = os.path.join(APP_DIR, "images")
 MATH_DIR = os.path.join(CACHE_DIR, "math")
 
+VERSION = "1.1.7"      # 发版只改这一处：窗口标题 / 顶栏 / 托盘提示 一起变
+
 # 公式里夹中文时 mathtext 默认字体没有汉字，会画成方框；这类表达式换微软雅黑字体集
 CJK_RE = re.compile(r"[⺀-鿿＀-￯]")
 CJK_MATH_RC = {
@@ -1297,8 +1299,8 @@ class PeiduApp:
     # ---------------- UI
     def build_ui(self):
         r = self.root
-        r.title("陪读")
-        r.geometry("620x820+80+50")
+        r.title("陪读 v" + VERSION)
+        r.geometry("720x820+80+50")
         r.minsize(460, 520)
         r.configure(bg=BG)
         r.attributes("-topmost", True)
@@ -1309,6 +1311,8 @@ class PeiduApp:
         head = tk.Frame(r, bg=BG)
         head.pack(fill="x", padx=14, pady=(12, 0))
         tk.Label(head, text="陪读", bg=BG, fg=FG, font=("Microsoft YaHei UI", 14, "bold")).pack(side="left")
+        tk.Label(head, text="v" + VERSION, bg=BG, fg=MUTED,
+                 font=("Microsoft YaHei UI", 7)).pack(side="left", padx=(4, 0), pady=(7, 0))
         self.model_var = tk.StringVar(value=self.provider)
         cb = ttk.Combobox(head, textvariable=self.model_var, values=list(self.cfg.get("providers") or {}),
                           width=9, state="readonly")
@@ -2241,7 +2245,7 @@ class PeiduApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", act(self.quit)),
         )
-        self.tray = pystray.Icon("peidu", img, "陪读", menu)
+        self.tray = pystray.Icon("peidu", img, "陪读 v" + VERSION, menu)
         try:
             self.tray.run_detached()
         except Exception:
