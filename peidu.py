@@ -49,7 +49,7 @@ LOG_PATH = os.path.join(APP_DIR, "peidu.log")
 CACHE_DIR = os.path.join(APP_DIR, "images")
 MATH_DIR = os.path.join(CACHE_DIR, "math")
 
-VERSION = "1.1.8"      # 发版只改这一处：窗口标题 / 顶栏 / 托盘提示 一起变
+VERSION = "1.1.9"      # 发版只改这一处：窗口标题 / 顶栏 / 托盘提示 一起变
 
 # 公式里夹中文时 mathtext 默认字体没有汉字，会画成方框；这类表达式换微软雅黑字体集
 CJK_RE = re.compile(r"[⺀-鿿＀-￯]")
@@ -1362,6 +1362,7 @@ class PeiduApp:
         self.start_tray()
         self.start_hotkeys()
         self.root.after(60, self.pump)
+        self.root.after(1000, self.status_tick)
         self.root.after(600, self.watch_show_request)
 
     # ---------------- UI
@@ -2396,8 +2397,12 @@ class PeiduApp:
 
     def on_send(self):
         if self.busy:
+            # 立刻解锁界面：卡在等服务器时，用户点「停止」不该继续显示「停止」
             self.cancel_flag.set()
-            self.status.config(text="已中断")
+            self.busy = False
+            self.send_btn.config(text="发送", bg=ACCENT)
+            self.status.config(text="已停止（后台连接会自己断）")
+            log("用户点了停止")
             return
         text = self.entry.get("1.0", "end").strip()
         quote, img = self.quote_text.strip(), self.quote_image
@@ -2483,25 +2488,51 @@ class PeiduApp:
         self.chat.configure(state="disabled")
 
         self.busy = True
+        self.round_token = object()      # 这一轮的身份；停止后残留消息靠它丢弃
         self.cancel_flag.clear()
         self.tokens = 0
+        self.first_byte = False
+        self.stream_buf = ""
         self.t0 = time.time()
         self.send_btn.config(text="停止", bg=STOP_BG)
         self.status.config(text="思考中…")
-        threading.Thread(target=self.worker, daemon=True).start()
+        threading.Thread(target=self.worker, args=(self.round_token,), daemon=True).start()
 
-    def worker(self):
+    def emit(self, token, kind, data):
+        """把消息投给主线程；token 不是当前这轮就丢掉——用户点了停止又立刻提问时，
+        上一轮的 chunk 不能画到新一轮的框里。"""
+        if token is not None and token is not getattr(self, "round_token", None):
+            return
+        self.q.put((kind, data))
+
+    def worker(self, token=None):
+        t_req = time.time()
+        try:
+            self._worker_body(t_req, token)
+        except Exception as ex:          # 线程里任何异常都必须回主线程，否则界面永远停在「停止」
+            log("请求失败: %r（%.1fs）" % (ex, time.time() - t_req))
+            self.emit(token, "error", repr(ex))
+
+    def _worker_body(self, t_req, token=None):
         prov = self.cfg["providers"].get(self.provider)
         if not prov:
-            self.q.put(("error", "没有配置模型服务"))
+            self.emit(token, "error", "没有配置模型服务")
             return
         base = prov["base"].rstrip("/")
         url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
+        # localhost 在这台机器上会先试 IPv6(::1) 再退回 127.0.0.1，白等 2 秒；
+        # 本地/内网地址也不该走系统代理（HTTP_PROXY 一开，请求会绕到 socks 上去）
+        host = urlsplit(url).hostname or ""
+        local = (host in ("localhost", "127.0.0.1", "::1")
+                 or host.startswith(("192.168.", "10.", "172.")))
+        if host == "localhost":
+            url = url.replace("//localhost", "//127.0.0.1")
+        proxies = {"http": None, "https": None} if local else None
         msgs = self.messages
         wiki_q = getattr(self, "wiki_query", "")
         wiki_img = getattr(self, "wiki_img", None)
         if wiki_img is not None and not wiki_q:
-            self.q.put(("status", "看图提关键词…"))
+            self.emit(token, "status", "看图提关键词…")
             try:
                 kws = _extract_keywords(prov, wiki_img)
                 wiki_q = kws
@@ -2510,9 +2541,9 @@ class PeiduApp:
                 kws = []
                 log("提炼关键词失败: %r" % ex)
             if kws:
-                self.q.put(("status", "关键词：" + "、".join(kws[:4])))
+                self.emit(token, "status", "关键词：" + "、".join(kws[:4]))
         if wiki_q:
-            self.q.put(("status", "查维基…"))
+            self.emit(token, "status", "查维基…")
             ctx, srcs, label = "", [], ""
             try:
                 ctx, srcs, label = wiki_context(
@@ -2535,81 +2566,119 @@ class PeiduApp:
                     last["content"] = parts
                 self.wiki_srcs = srcs
                 self.wiki_label = label
-                self.q.put(("status", "维基 %d 条 · %s · 思考中…" % (len(srcs), label)))
+                self.emit(token, "status", "维基 %d 条 · %s · 思考中…" % (len(srcs), label))
             else:
-                self.q.put(("status", "维基没查到，按常识回答"))
+                self.emit(token, "status", "维基没查到，按常识回答")
         payload = {"model": prov["model"], "messages": msgs, "stream": True, "temperature": 0.7}
         payload.update(prov.get("params") or {})
         headers = {"Authorization": "Bearer " + prov.get("key", ""), "Content-Type": "application/json"}
         buf = ""
-        try:
-            with requests.post(url, json=payload, headers=headers, stream=True, timeout=180) as resp:
-                if resp.status_code != 200:
-                    self.q.put(("error", "HTTP %s: %s" % (resp.status_code, resp.text[:300])))
-                    return
-                for raw in resp.iter_lines(decode_unicode=False):
-                    if self.cancel_flag.is_set():
-                        break
-                    if not raw:
-                        continue
-                    # 服务端 Content-Type 是 text/event-stream，requests 会按 ISO-8859-1 解，
-                    # 中文会变成 ä¡½ 这种乱码；这里自己按 UTF-8 解。
-                    line = raw.decode("utf-8", "replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        obj = json.loads(data)
-                    except Exception:
-                        continue
-                    ch = obj.get("choices") or []
-                    if not ch:
-                        continue
-                    piece = (ch[0].get("delta") or {}).get("content")
-                    if piece:
-                        buf += piece
-                        self.q.put(("chunk", buf))
-                    usage = obj.get("usage")
-                    if usage:
-                        self.q.put(("usage", usage.get("completion_tokens") or 0))
-            self.q.put(("done", buf))
-        except Exception as ex:
-            self.q.put(("error", repr(ex)))
+        first = None
+        log("请求: %s model=%s msgs=%d" % (url, prov.get("model"), len(msgs)))
+        with requests.post(url, json=payload, headers=headers, stream=True,
+                           timeout=(10, 180), proxies=proxies) as resp:
+            if resp.status_code != 200:
+                body = resp.text[:300]
+                log("请求: HTTP %s %s" % (resp.status_code, body[:200]))
+                self.emit(token, "error", "HTTP %s: %s" % (resp.status_code, body))
+                return
+            for raw in resp.iter_lines(decode_unicode=False):
+                if self.cancel_flag.is_set():
+                    log("请求: 已取消（%.1fs，%d 字）" % (time.time() - t_req, len(buf)))
+                    break
+                if not raw:
+                    continue
+                # 服务端 Content-Type 是 text/event-stream，requests 会按 ISO-8859-1 解，
+                # 中文会变成 ä¡½ 这种乱码；这里自己按 UTF-8 解。
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except Exception:
+                    continue
+                ch = obj.get("choices") or []
+                if not ch:
+                    continue
+                piece = (ch[0].get("delta") or {}).get("content")
+                if piece:
+                    if first is None:
+                        first = time.time() - t_req
+                        log("请求: 首包 %.2fs" % first)
+                    buf += piece
+                    self.emit(token, "chunk", buf)
+                usage = obj.get("usage")
+                if usage:
+                    self.emit(token, "usage", usage.get("completion_tokens") or 0)
+        log("请求: 完成 %.1fs %d 字%s" % (time.time() - t_req, len(buf),
+                                     "" if first is None else "（首包 %.2fs）" % first))
+        self.emit(token, "done", buf)
 
     def pump(self):
         try:
             while True:
                 kind, data = self.q.get_nowait()
-                if kind == "chunk":
-                    self.render_stream(data)
-                elif kind == "usage":
-                    self.tokens = data
-                elif kind == "done":
-                    self.finish_round(data)
-                elif kind == "error":
-                    self.chat.configure(state="normal")
-                    self.chat.insert("end", "\n[出错] " + str(data), "err")
-                    self.chat.configure(state="disabled")
-                    self.status.config(text="出错：" + str(data)[:60])
-                    self.busy = False
-                    self.send_btn.config(text="发送", bg=ACCENT)
-                elif kind == "status":
-                    self.status.config(text=str(data))
-                elif kind == "grab_done":
-                    text, info = data
-                    self.finish_grab_text(text, info)
-                elif kind == "hotkey":
-                    if getattr(self, "suppress_hotkeys", False):
-                        continue
-                    if data == "text":
-                        self.do_grab_text()
-                    else:
-                        self.do_grab_image()
+                try:
+                    self.dispatch(kind, data)
+                except Exception as ex:
+                    # 单个消息处理崩了不能带走整个 pump：否则界面永远停在「停止」，
+                    # 用户看到的就是「画面停住了」，日志里也什么都没有。
+                    log("界面处理异常(%s): %r" % (kind, ex))
+                    if kind in ("chunk", "done", "error"):
+                        self.busy = False
+                        self.send_btn.config(text="发送", bg=ACCENT)
+                        self.status.config(text="界面出错，详情见 peidu.log")
         except queue.Empty:
             pass
-        self.root.after(60, self.pump)
+        finally:
+            self.root.after(60, self.pump)
+
+    def dispatch(self, kind, data):
+        if kind == "chunk":
+            self.first_byte = True
+            self.stream_buf = data
+            self.render_stream(data)
+        elif kind == "usage":
+            self.tokens = data
+        elif kind == "done":
+            self.finish_round(data)
+        elif kind == "error":
+            self.chat.configure(state="normal")
+            self.chat.insert("end", "\n[出错] " + str(data), "err")
+            self.chat.configure(state="disabled")
+            self.status.config(text="出错：" + str(data)[:60])
+            self.busy = False
+            self.send_btn.config(text="发送", bg=ACCENT)
+        elif kind == "status":
+            self.status.config(text=str(data))
+        elif kind == "grab_done":
+            text, info = data
+            self.finish_grab_text(text, info)
+        elif kind == "hotkey":
+            if getattr(self, "suppress_hotkeys", False):
+                return
+            if data == "text":
+                self.do_grab_text()
+            else:
+                self.do_grab_image()
+
+    def status_tick(self):
+        """忙的时候每秒刷一次耗时：分不清「在思考」和「卡死」就是没有心跳。"""
+        try:
+            if getattr(self, "busy", False):
+                dt = time.time() - getattr(self, "t0", time.time())
+                if getattr(self, "first_byte", False):
+                    self.status.config(text="生成中 · %.0fs · %d 字" % (dt, len(getattr(self, "stream_buf", "") or "")))
+                else:
+                    base = self.status.cget("text").split(" · ")[0]
+                    tail = "" if dt < 60 else "（服务器没回数据，可点停止）"
+                    self.status.config(text="%s · %.0fs%s" % (base, dt, tail))
+        except Exception:
+            pass
+        self.root.after(1000, self.status_tick)
 
     def do_grab_text(self):
         # 不先 show：抢焦点会让 Ctrl+C 落到自己窗口上，取到的就是旧内容
@@ -2742,6 +2811,7 @@ class PeiduApp:
         dt = time.time() - self.t0
         self.status.config(text="%s · %.1fs · %s tokens" % (self.provider, dt, self.tokens or "?"))
         self.busy = False
+        self.first_byte = False
         self.send_btn.config(text="发送", bg=ACCENT)
 
     def math_photo(self, expr, display=False):
@@ -2936,6 +3006,11 @@ class PeiduApp:
 
     # ---------------- 其它
     def new_topic(self):
+        if getattr(self, "busy", False):
+            # 忙的时候清空对话，会让 finish_round 写到一个已经不存在的位置，
+            # 界面看起来就是「停住了」——先让用户停掉这一轮
+            self.status.config(text="等这一轮答完（或点「停止」）再新建话题")
+            return
         self.messages = []
         self.img_paths = []
         self.img_by_idx = {}
