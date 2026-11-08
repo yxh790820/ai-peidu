@@ -49,7 +49,7 @@ LOG_PATH = os.path.join(APP_DIR, "peidu.log")
 CACHE_DIR = os.path.join(APP_DIR, "images")
 MATH_DIR = os.path.join(CACHE_DIR, "math")
 
-VERSION = "1.1.7"      # 发版只改这一处：窗口标题 / 顶栏 / 托盘提示 一起变
+VERSION = "1.1.8"      # 发版只改这一处：窗口标题 / 顶栏 / 托盘提示 一起变
 
 # 公式里夹中文时 mathtext 默认字体没有汉字，会画成方框；这类表达式换微软雅黑字体集
 CJK_RE = re.compile(r"[⺀-鿿＀-￯]")
@@ -216,6 +216,10 @@ DEFAULT_PROMPTS = [
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+# 64 位下句柄必须按 HWND 取，默认 c_int 会把窗口句柄截断
+user32.GetForegroundWindow.restype = wt.HWND
+user32.GetForegroundWindow.argtypes = []
+user32.WindowFromPoint.restype = wt.HWND
 
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
 WM_HOTKEY = 0x0312
@@ -448,14 +452,75 @@ def clip_set(root, text):
         pass
 
 
-def wait_modifiers_released(timeout=3.0):
-    """等 Alt/Ctrl 松开。热键是 Alt+1，按着不放就发 Ctrl+C 会变成 Alt+Ctrl+C。"""
+MOD_VKS = (0x12, 0xA4, 0xA5, 0x11, 0xA2, 0xA3, 0x10, 0xA0, 0xA1)   # Alt/Ctrl/Shift 泛用+左右
+
+
+def modifiers_down():
+    """Alt/Ctrl 现在是否还按着（泛用 VK 有时会残留，左右键一起看）。"""
+    try:
+        for vk in (0x12, 0xA4, 0xA5, 0x11, 0xA2, 0xA3):
+            if user32.GetAsyncKeyState(vk) & 0x8000:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def force_release_modifiers():
+    """强发一遍修饰键 keyup。
+
+    2026-11-08：物理按着不放 / 输入法或钩子残留时，GetAsyncKeyState 会一直报
+    按下，旧写法直接 3 秒后放弃，用户看到的就是「热键还按着，松开 Alt 再按」。
+    实测（inj2.py）发 keyup 就能把逻辑状态清成松开，之后的 Ctrl+C 不会再变成
+    Alt+Ctrl+C，所以这里主动清、不等用户松手。
+    """
+    for vk in MOD_VKS:
+        try:
+            user32.keybd_event(vk, 0, 0x0002, 0)
+        except Exception:
+            pass
+    time.sleep(0.03)
+
+
+def wait_modifiers_released(timeout=0.8):
+    """等修饰键松开；超时就自己 keyup 清掉。返回 (ok, forced)。
+
+    热键是 Alt+1，Alt 按着发 Ctrl+C 会变成 Alt+Ctrl+C，所以必须保证复制那一刻
+    修饰键是松开的——但「用户按着不放」不该算失败，强制放开后照常取词。
+    """
     end = time.time() + timeout
     while time.time() < end:
-        if not (user32.GetAsyncKeyState(0x12) & 0x8000) and not (user32.GetAsyncKeyState(0x11) & 0x8000):
-            return True
+        if not modifiers_down():
+            return True, False
         time.sleep(0.02)
-    return False
+    force_release_modifiers()
+    return (not modifiers_down()), True
+
+
+def set_foreground(hwnd):
+    """把焦点还给目标窗口（跨线程要用 AttachThreadInput 绕过前台锁）。"""
+    try:
+        hwnd = int(hwnd or 0)
+        if not hwnd or not user32.IsWindow(hwnd):
+            return False
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)                      # SW_RESTORE
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+        fg = user32.GetForegroundWindow()
+        tid_fg = user32.GetWindowThreadProcessId(fg, None)
+        tid_me = kernel32.GetCurrentThreadId()
+        attached = False
+        if tid_fg and tid_fg != tid_me:
+            attached = bool(user32.AttachThreadInput(tid_me, tid_fg, True))
+        ok = bool(user32.SetForegroundWindow(hwnd))
+        if attached:
+            user32.AttachThreadInput(tid_me, tid_fg, False)
+        time.sleep(0.05)
+        return bool(ok and user32.GetForegroundWindow() == hwnd)
+    except Exception as ex:
+        log("还焦点失败: %r" % (ex,))
+        return False
 
 
 def _send_copy(alt=False):
@@ -505,6 +570,9 @@ def grab_selection(total=1.5):
     attempts = 4
     for i in range(attempts):
         info["tries"] = i + 1
+        # 物理按着 Alt 不放时，系统会在下一个按键事件里把 Alt 状态重新带上，
+        # 所以每次发 Ctrl+C 之前都再清一遍修饰键（否则变成 Alt+Ctrl+C，白试一次）
+        force_release_modifiers()
         _send_copy(alt=(i >= 2))
         deadline = time.time() + (0.42 if i < attempts - 1 else 0.35)
         while time.time() < deadline and time.time() - t0 < total:
@@ -2549,17 +2617,32 @@ class PeiduApp:
             return                      # 上一次还没取完，连按不叠加
         self.grabbing = True
         self.status.config(text="取词中…")
+        try:
+            self.grab_target = int(user32.GetForegroundWindow() or 0)   # 热键那一刻的前台窗口
+        except Exception:
+            self.grab_target = 0
 
         def job():
             try:
                 fg = fg_desc()
-                if not wait_modifiers_released(3.0):
-                    log("取词: 跳过，Alt/Ctrl 一直没松开")
+                ok, forced = wait_modifiers_released(0.8)
+                if forced:
+                    log("取词: 修饰键一直没松开，已强制 keyup 后继续 fg=%s" % fg)
+                if not ok:
+                    log("取词: 跳过，强制放开后修饰键仍显示按下 fg=%s" % fg)
                     self.q.put(("grab_done", ("", {"why": "按键没松开", "tries": 0, "ms": 0})))
                     return
                 time.sleep(0.06)        # 让目标程序先把热键的 keyup 处理完
+                # 上一次失败可能把陪读自己弹到了前面：先把焦点还回目标窗口再复制
+                tgt = getattr(self, "grab_target", 0)
+                now = user32.GetForegroundWindow()
+                if tgt and now != tgt and user32.IsWindow(tgt):
+                    back = set_foreground(tgt)
+                    log("取词: 焦点不在目标窗口（now=%s），还焦点=%s" % (now, back))
+                    time.sleep(0.08)
                 text, info = grab_selection()
-                log("取词: %s %s fg=%s" % ("OK" if text.strip() else "失败", info, fg))
+                log("取词: %s %s fg=%s copy_fg=%s" % (
+                    "OK" if text.strip() else "失败", info, fg, fg_desc()))
                 self.q.put(("grab_done", (text, info)))
             except Exception as ex:
                 log("取词线程异常: %r" % (ex,))
@@ -2567,20 +2650,33 @@ class PeiduApp:
 
         threading.Thread(target=job, daemon=True).start()
 
+    def notify(self, msg):
+        """托盘气泡提示。取词失败时用它，不弹主窗——弹窗抢焦点会让下一次取词复制到陪读自己。"""
+        try:
+            if getattr(self, "has_tray", False) and getattr(self, "tray", None):
+                self.tray.notify(msg, "AI陪读")
+                return True
+        except Exception as ex:
+            log("托盘通知失败: %r" % (ex,))
+        return False
+
     def finish_grab_text(self, text="", info=None):
         self.grabbing = False
         info = info or {}
         text = text or ""
         if not text.strip():
-            self.show()
             why = info.get("why", "")
             if why == "按键没松开":
-                msg = "没取到：热键还按着，松开 Alt 再按一次"
+                msg = "没取到：修饰键一直按着，等一下再按一次"
             elif why == "剪贴板里不是文字":
                 msg = "没取到：复制出来的不是文字"
+            elif why == "内部异常":
+                msg = "没取到：取词出错，详情见 peidu.log"
             else:
                 msg = "没取到选中文字：先选中文字再按热键"
             self.status.config(text=msg)
+            if not self.notify(msg):        # 没有托盘才退回弹窗
+                self.show()
             return
         self.show()
         self.set_quote(text=text)
