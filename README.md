@@ -1,5 +1,21 @@
 # AI 陪读小窗（便携版）
 
+**English** | 中文
+
+A tray-resident Windows reading assistant: **select text or crop a screenshot → it asks automatically → keep asking → save to Obsidian**. Python + tkinter, no Electron, starts fast and stays small.
+
+- Global hotkeys: `Ctrl+Alt+A` for selected text, `Ctrl+Alt+S` for a screen region (multi-monitor, 125%/150% scaling aware)
+- Auto-send on capture, continuous follow-up questions with context
+- Any OpenAI-compatible endpoint (DeepSeek, llama.cpp / vLLM, Ollama, OneAPI…), switched from a dropdown
+- 9 prompt presets (reading, translation, polish, summary, pinyin, classical Chinese ×2, formula OCR, Wikipedia), fully editable
+- Wikipedia lookup: local Kiwix or official Wikipedia (proxy supported); toggle in the toolbar
+- Formula rendering via matplotlib, one-click save to Obsidian with screenshots
+- 📱 Android version: [ai-peidu-android](https://github.com/yxh790820/ai-peidu-android)
+
+---
+
+## 中文
+
 一个常驻托盘的 Windows 读书助手：**划词或框选截图 → 自动提问 → 连续追问 → 一键存进 Obsidian**。
 
 ![界面截图](docs/screenshot.png)
