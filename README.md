@@ -4,6 +4,8 @@
 
 ![界面截图](docs/screenshot.png)
 
+> **📱 手机版（安卓）**：[**AI 陪读 · 安卓版**](https://github.com/yxh790820/ai-peidu-android) —— 长按选中文字点「陪读」或点悬浮球框选截图，同一套提示词档位、同样能查维基、能存进 Obsidian。APK 约 3.8 MB，不用装 Python。
+
 看书时选中一段文字按 `Ctrl+Alt+A`，或框选一页书/一道题按 `Ctrl+Alt+S`，小窗自动带着上下文去问模型；答案里的公式会渲染成图片，聊完点「存笔记」直接写进笔记库（截图一起带过去）。
 
 > 个人自用小工具，Windows 10/11 专用。界面是 tkinter，无边框特效、无 Electron，启动快、占内存小。
