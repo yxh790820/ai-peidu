@@ -49,7 +49,7 @@ LOG_PATH = os.path.join(APP_DIR, "peidu.log")
 CACHE_DIR = os.path.join(APP_DIR, "images")
 MATH_DIR = os.path.join(CACHE_DIR, "math")
 
-VERSION = "1.1.9"      # 发版只改这一处：窗口标题 / 顶栏 / 托盘提示 一起变
+VERSION = "1.1.12"     # 发版只改这一处：窗口标题 / 顶栏 / 托盘提示 一起变
 
 # 公式里夹中文时 mathtext 默认字体没有汉字，会画成方框；这类表达式换微软雅黑字体集
 CJK_RE = re.compile(r"[⺀-鿿＀-￯]")
@@ -843,6 +843,8 @@ WIKI_DEFAULT_FALLBACK = "https://zh.wikipedia.org"   # 本地没开/没结果时
 # 官方维基在国内要翻墙；留空 = 直连（或 requests 自己看到的系统代理变量）
 WIKI_DEFAULT_PROXY = ""
 WIKI_UA = "Peidu/1.1 (personal study widget)"
+# 资料只是条目节选：这句写进数据里，别写进 system（通用 system 加条件句会让模型在别的场景反问）
+EXCERPT_NOTE = "（说明：下面是条目节选，通常只到条目的前几段。按已有内容讲就行，不必说明「资料不完整」「内容被截断」。）\n"
 
 
 def _strip_html(t):
@@ -929,7 +931,7 @@ def wiki_title_hits(base, query, lang="zho", limit=4):
     return uniq[:limit]
 
 
-def wiki_search(base, query, lang="zho", limit=8):
+def wiki_search(base, query, lang="zho", limit=20):
     """在本地 Kiwix 里搜，返回 [{href,title,snippet}]。
 
     服务要求按语言过滤（books.filter.lang），否则多语言混搜直接 400。
@@ -942,8 +944,10 @@ def wiki_search(base, query, lang="zho", limit=8):
     except Exception as ex:
         log("标题检索失败 %s: %r" % (query, ex))
     url = base + "/search"
+    # 热门短词（日本/中国）前十几条几乎全是 Category: 页面，被下游过滤掉就等于没搜到，
+    # 所以一次多取些（20 条），成本只是一个稍大的 HTML
     r = requests.get(url, params={"pattern": query, "books.filter.lang": lang,
-                                  "pageLength": limit}, timeout=12)
+                                  "pageLength": limit}, timeout=20)
     r.raise_for_status()
     txt = r.content.decode("utf-8", "replace")
     seen = {h["href"] for h in hits}
@@ -957,8 +961,25 @@ def wiki_search(base, query, lang="zho", limit=8):
     return hits
 
 
-def wiki_article(base, href, limit=1400):
-    """抓一个条目，取正文前 limit 字。"""
+def _cut_clean(t, limit):
+    """按长度截断，但切在最后一个句末上。
+
+    直接 [:limit] 会把句子切成半截（「…是各」「…影響也」），模型看到残句就会在回答里写
+    「资料到此截断／未完整」——用户看到的就是「维基百科的结果经常显示中断」。
+    """
+    t = t or ""
+    if len(t) <= limit:
+        return t
+    head = t[:limit]
+    # 优先切在句末；没有句末就退到段落换行；两样都太靠前（前 1/3 内）才按字数切
+    sent = max(head.rfind("。"), head.rfind("！"), head.rfind("？"))
+    nl = head.rfind("\n")
+    idx = sent if sent > limit // 3 else (nl if nl > limit // 3 else -1)
+    return (head[:idx + 1].rstrip() if idx >= 0 else head)
+
+
+def wiki_article(base, href, limit=2500):
+    """抓一个条目，取正文前 limit 字（切在句末）。"""
     r = requests.get((base or WIKI_DEFAULT_BASE).rstrip("/") + href, timeout=15)
     r.raise_for_status()
     t = _strip_html(r.content.decode("utf-8", "replace"))
@@ -971,7 +992,7 @@ def wiki_article(base, href, limit=1400):
         if body and ln == body[-1]:         # 标题在两行里重复出现
             continue
         body.append(ln)
-    return "\n".join(body)[:limit]
+    return _cut_clean("\n".join(body), limit)
 
 
 def _wiki_kind(base):
@@ -1072,7 +1093,7 @@ def mw_search(base, query, lang="zho", limit=8, proxy=""):
     return out
 
 
-def mw_article(base, title, limit=1400, proxy=""):
+def mw_article(base, title, limit=2500, proxy=""):
     """官方维基取条目正文（TextExtracts 的纯文本）。"""
     data = _mw_api(base, {"action": "query", "prop": "extracts", "explaintext": 1,
                           "exsectionformat": "plain", "redirects": 1,
@@ -1085,7 +1106,7 @@ def mw_article(base, title, limit=1400, proxy=""):
     txt = (pages[0].get("extract") or "").strip()
     txt = re.sub(r"\{\\?displaystyle[^}]*\}", " ", txt)      # 纯文本里的公式残留
     txt = re.sub(r"[ \t]+", " ", txt)
-    return re.sub(r"\n{3,}", "\n\n", txt).strip()[:limit]
+    return _cut_clean(re.sub(r"\n{3,}", "\n\n", txt).strip(), limit)
 
 
 def wiki_search_any(base, query, lang="zho", proxy=""):
@@ -1194,7 +1215,29 @@ def wiki_context(base, query, max_articles=2, fallback="", proxy=""):
         kind = _wiki_kind(b)
         if kind == "kiwix" and not _wiki_alive(b):
             log("维基地址连不上，跳过：%s" % b)
-            continue
+        # 0) 先按同名条目直取。Kiwix 的 /suggest 索引不全：搜「日本」只回 .日本 / BS日本 /
+        #    Amazon日本 / CS日本，正主《日本》根本不在里面；而 /content/日本 是 200。
+        #    （安卓版早就这么干了，电脑版漏了这一步，才会在「日本」上挑到 BS日本。）
+        if kind == "kiwix":
+            direct = ""
+            for lang in ("zho", "eng"):
+                for qv in variants[:8]:
+                    for book in _wiki_books(b, lang):
+                        try:
+                            body = wiki_article(b, "/content/%s/%s" % (book, quote(qv, safe="/")))
+                        except Exception:
+                            continue
+                        if len(body) > 200:
+                            log("维基直取命中 %s/%s（%d 字）" % (book, qv, len(body)))
+                            direct = (qv, body)
+                            break
+                    if direct:
+                        break
+                if direct:
+                    break
+            if direct:
+                return ("【维基资料】\n" + EXCERPT_NOTE + "【条目：%s】（节选）\n%s" % direct,
+                        [direct[0]], "本地 Kiwix")
         hits = []
         for lang in ("zho", "eng"):
             for qv in variants[:8]:
@@ -1254,11 +1297,11 @@ def wiki_context(base, query, max_articles=2, fallback="", proxy=""):
             if key in seen_bodies:
                 continue                  # 简繁两条通常是同一个条目，别重复占名额
             seen_bodies.add(key)
-            parts.append("【条目：%s】\n%s" % (h["title"], body))
+            parts.append("【条目：%s】（节选）\n%s" % (h["title"], body))
             srcs.append(h["title"])
         if parts:
             label = "官方维基" if kind == "mediawiki" else "本地 Kiwix"
-            return "【维基资料】\n" + "\n\n".join(parts), srcs, label
+            return ("【维基资料】\n" + EXCERPT_NOTE + "\n\n".join(parts)), srcs, label
     return "", [], ""
 
 # ---------------------------------------------------------------- 截图框选
